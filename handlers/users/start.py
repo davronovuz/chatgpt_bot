@@ -7,13 +7,13 @@ user_router = Router()
 
 @user_router.message(CommandStart())
 async def user_start(message: Message):
-    # Foydalanuvchi nomini xavfsiz ko‘rsatish (HTML escapе)
+    # Foydalanuvchi nomini xavfsiz ko‘rsatish (HTML escape)
     name = escape((message.from_user.full_name or message.from_user.first_name or "do‘st").strip())
 
     welcome_message = (
-        f"🤖 <b>Chaqqon AI</b> ga xush kelibsiz, {name}!<br>"
-        "⚡️ Savolingizni yozing — chaqqon va aniq javob beraman.<br><br>"
-        "🧹 Kontekstni tozalash: <code>/reset</code><br>"
+        f"🤖 <b>Chaqqon AI</b> ga xush kelibsiz, {name}!\n"
+        "⚡️ Savolingizni yozing — chaqqon va aniq javob beraman.\n\n"
+        "🧹 Kontekstni tozalash: <code>/reset</code>\n"
         "💬 Har qanday fikr-mulohazani bemalol yozing."
     )
 
