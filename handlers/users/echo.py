@@ -35,7 +35,7 @@ load_dotenv()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-BOT_USERNAME = os.getenv("BOT_USERNAME", "@chaqqonaibot")  # masalan: 'guruh_yordamchi_bot'
+BOT_USERNAME = os.getenv("BOT_USERNAME", "chaqqonaibot")  # masalan: 'guruh_yordamchi_bot'
 USTOZ_USERNAME = os.getenv("USTOZ_USERNAME", "davronovsimple")  # '@' siz
 
 if not OPENAI_API_KEY:
@@ -67,18 +67,19 @@ HISTORY: Dict[int, Deque[ChatCompletionMessageParam]] = defaultdict(lambda: dequ
 LAST_SEEN_USER: Dict[int, float] = defaultdict(float)   # user_id -> ts
 GROUP_COOLDOWN: Dict[int, float] = defaultdict(float)   # chat_id -> ts
 THREAD_COUNT: Dict[Tuple[int, Optional[int]], int] = defaultdict(int)
+# Paste this over your broken SYSTEM_PROMPT block
+# Clean, single string; no stray quotes; tight instructions.
 
-# ---------------------- Prompt (persona) ----------------------
 SYSTEM_PROMPT = (
     "Siz 'GuruhYordamchi' nomli Telegram guruh assistentisiz. Auditoriya — IT TATdagi dasturchi talabalar. "
-    "Rolingiz: faqat IT/dasturlash mavzularida juda qisqa va lo'nda javob bering. Doimo hurmatli, yengil hazil bilan. "
-    "Hech qachon kod yozmaysiz, hatto so'ralsa ham. Kod o'rniga yo'nalish, tekshirish ro'yxati yoki konseptual maslahat bering. "
-    "Agar kimligingiz so'ralsa: 'Men ustoz Davronov G'olibjonning yordamchisiman, IT TAT o'quv markazidan.' deb javob bering. "
-    "Ustoz (@davronovsimple) fikr bildirsa, avval tasdiq: 'To'g'ri aytyapsiz ustoz ✅', so'ng bitta juda qisqa qo'shimcha bering. "
-    "Mavzu doirasi: python, js, web, backend, frontend, devops va shu kabi. Boshqa mavzularni qatiy rad eting. "
-    "Javob formati: 1–2 jumla (eng ko'pi 3) yoki 3 punktli juda qisqa bullet. Emojilar minimal (🙂, ✅) va faqat kerak bo'lsa. "
-    "Kod so'ralsa hazil bilan yumshoq rad eting (masalan: 'Men kod yozsam, siz nima o'rganasiz? 🙂 Yo'nalish: ...')."
+    "Faqat trigger bo'lganda javob bering (mention, /ask, ustoz xabari, qizigan bahs yoki bot javobiga reply). "
+    "Faqat IT/dasturlash doirasida juda qisqa va lo'nda yozing: 1–2 jumla (eng ko'pi 3) yoki 3 punkt. "
+    "Hech qachon kod yozmaysiz. Kod so'ralsa, qisqa hazil bilan rad eting va yo'nalish bering. "
+    "Hech qachon o'zingizni tanishtirmang — faqat aniq so'ralganda: 'Men ustoz Davronov G'olibjonning yordamchisiman, IT TAT o'quv markazidan.' deb javob bering. "
+    "Ustoz (@davronovsimple) xabar yozsa, avval tasdiqlang: 'To'g'ri aytyapsiz ustoz ✅', so'ng bitta juda qisqa qo'shimcha bering. "
+    "Boshqa mavzularni qat'iy rad eting. Emojilar minimal (🙂, ✅) va faqat kerak bo'lsa."
 )
+
 
 # ---------------------- Util funksiyalar ----------------------
 
@@ -106,7 +107,8 @@ def is_heating_up(chat_id: int, thread_id: Optional[int], text: str) -> bool:
     THREAD_COUNT[key] += 1
     low = (text or "").lower()
     hot = sum(1 for k in HEATED_MARKERS if k in low)
-    return THREAD_COUNT[key] >= 3 or hot >= 2
+    # tezroq tutish: 2 xabar yoki 1 ta "issiq" so'z yetarli
+    return THREAD_COUNT[key] >= 2 or hot >= 1
 
 def user_rate_limited(user_id: int) -> bool:
     now = time.time()
@@ -123,22 +125,44 @@ def group_cooldown_ok(chat_id: int) -> bool:
         return True
     return False
 
-MENTION_WORDS = ("fikir", "izoh", "aniqlashtir", "xulosa")
+MENTION_WORDS = ("fikir", "izoh", "aniqlashtir", "xulosa", "fikr")
+
+# --- qo'shimcha trigger yordamchilari ---
+def mentioned_directly(text: str) -> bool:
+    return bool(BOT_USERNAME) and (f"@{BOT_USERNAME}".lower() in (text or "").lower())
+
+def reply_to_bot(message: types.Message) -> bool:
+    u = getattr(getattr(message, "reply_to_message", None), "from_user", None)
+    if not u or not u.username:
+        return False
+    return bool(BOT_USERNAME) and (u.username.lower() == BOT_USERNAME.lower())
+
+def is_ustoz_message(message: types.Message) -> bool:
+    u = message.from_user
+    return bool(u and u.username and (u.username.lower() == USTOZ_USERNAME.lower()))
+
+# "kod yozib ber" tipidagi so'rovlarni oldindan ushlaymiz (oddiy heuristika)
+CODE_HINTS = ("kod yoz", "kodini yoz", "kod yozib ber", "write code", "code sample", "snippet", "namuna")
+
+def is_code_request(text: str) -> bool:
+    low = (text or "").lower()
+    return any(h in low for h in CODE_HINTS)
 
 def should_respond(message: types.Message, admin_ids: set) -> bool:
     text = message.text or ""
+    # 0) agar botning javobiga reply bo'lsa
+    if reply_to_bot(message):
+        return True
     # 1) @mention yoki /ask
-    if BOT_USERNAME and f"@{BOT_USERNAME}" in text:
+    if mentioned_directly(text) or text.startswith("/ask"):
         return True
-    if text.startswith("/ask"):
+    # 2) ustoz xabari (IT bo'lsa)
+    if is_ustoz_message(message) and looks_it_topic(text):
         return True
-    # 2) Ustoz/admin signali + savol/aniqlik
-    if is_from_ustoz(admin_ids, message.from_user.id, text) and is_question_or_confusion(text):
-        return True
-    # 3) Qizigan bahs + IT mavzusi + guruh cooldown
+    # 3) qizigan bahs + IT + savol/aniqlik + cooldown
     if looks_it_topic(text) and is_question_or_confusion(text) and is_heating_up(message.chat.id, message.message_thread_id, text):
         return group_cooldown_ok(message.chat.id)
-    # 4) Trigger so'zlar
+    # 4) trigger so'zlar
     if looks_it_topic(text) and any(w in text.lower() for w in MENTION_WORDS):
         return group_cooldown_ok(message.chat.id)
     return False
@@ -182,15 +206,36 @@ async def chatgpt_answer(chat_id: int, prompt: str) -> str:
 
 CODE_FENCE_RE = re.compile(r"```[\s\S]*?```", re.M)
 
-def sanitize_answer(ans: str) -> str:
-    """Hech qachon kod yubormaslik: code fence bo'lsa, hazil bilan almashtiramiz va qisqartiramiz."""
+def sanitize_answer(ans: str, prompt: str) -> str:
+    """Kod bloklarini chiqarib yubormaslik; o'zini tanishtirishni faqat so'ralganda; javobni juda qisqa tutish."""
+    # Kod bloklarini hazil bilan almashtiramiz
     if CODE_FENCE_RE.search(ans):
         ans = CODE_FENCE_RE.sub("Men kod yozsam, siz nima o'rganasiz? 🙂 Yo'nalish: 1) muammoni aniqlang; 2) kichik misol; 3) log/xatoni o'qing.", ans)
-    # Juda uzun gaplarni qisqartirish: 3 jumladan yig'ish
-    sentences = re.split(r"(?<=[.!?])\s+", ans.strip())
+    # O'zini tanishtirishni faqat "kim?" so'ralganda qoldiramiz
+    WHOAMI_SENT = "Men ustoz Davronov G'olibjonning yordamchisiman"
+    WHOASK_HINTS = ("kimsan", "kimligi", "kim o'zi", "who are you")
+    lowp = (prompt or "").lower()
+    if WHOAMI_SENT in ans and not any(h in lowp for h in WHOASK_HINTS):
+        ans = ans.replace(WHOAMI_SENT, "").strip()
+    # Juda uzun bo'lsa — 3 jumlagacha qisqartiramiz (sodda bo'luvchi)
+    buf = ans.strip()
+    for sep in [". ", "? ", "! "]:
+        buf = buf.replace(sep, "|SEP|")
+    sentences = [s.strip() for s in buf.split("|SEP|") if s.strip()]
     if len(sentences) > 3:
-        ans = " ".join(sentences[:3])
+        ans = ". ".join(sentences[:3])
+    else:
+        ans = ". ".join(sentences)
     return ans.strip() or "(bo'sh javob)"
+
+# ---------------------- Util: playful mode ----------------------
+PLAYFUL_HINTS = (
+    "hazil", "kuldir", "mem", "katta ketma", "uka", "sen mening yordamchimisan", "sening vazifang", "botjon", "bot aka", "aka bot", "bro", "aka"
+)
+
+def is_playful_request(text: str) -> bool:
+    low = (text or "").lower()
+    return any(h in low for h in PLAYFUL_HINTS)
 
 # ---------------------- Handlers ----------------------
 
@@ -225,50 +270,69 @@ async def xulosa_cmd(message: types.Message):
 
 @echo_router.message(F.text, StateFilter(None))
 async def group_only_listener(message: types.Message):
-    # 0) Faqat guruh
     if not is_group(message.chat.type):
-        return  # private chatda javob bermaymiz
+        return  # faqat guruh
 
     text = message.text or ""
 
-    # 1) IT mavzusi filtri (katta oqimni kamaytirish)
-    if not looks_it_topic(text) and not (BOT_USERNAME and f"@{BOT_USERNAME}" in text) and not text.startswith("/ask"):
+    # Mention/savol/IT yoki reply-to-bot bo'lmasa — jim (lekin hazilga bitta qisqa javob berishimiz mumkin)
+    if not (looks_it_topic(text) or is_question_or_confusion(text) or mentioned_directly(text)
+            or text.startswith("/ask") or reply_to_bot(message)):
+        if is_playful_request(text) and group_cooldown_ok(message.chat.id):
+            jokes = [
+                "Katta ketmang, uka 🙂 vazifa sodda: savolni aniqlang, keyin bir qadam qilib sinang.",
+                "Bot aka hushyor! Ammo IT bo'lmasa, jim turaman 😉",
+                "Hazil yaxshi, lekin commitlar yanayam yaxshi 😄",
+            ]
+            await message.reply(random.choice(jokes))
         return
 
-    # 2) Adminlarni oldindan topib olamiz
     admin_ids = await get_admin_ids(message.bot, message.chat.id)
-
-    # 3) Javob berish shartlari
     if not should_respond(message, admin_ids):
         return
 
-    # 4) Per-user rate limit
     if user_rate_limited(message.from_user.id):
         return
 
     await message.bot.send_chat_action(message.chat.id, ChatAction.TYPING)
 
-    # /ask komandasi bo'lsa, matndan olib tashlaymiz
-    prompt = text
-    if prompt.startswith("/ask"):
-        prompt = prompt[len("/ask"):].strip()
+    # /ask bo'lsa prefiksini olib tashlaymiz
+    prompt = text[len("/ask"):].strip() if text.startswith("/ask") else text
 
-    # Ustozga hurmatli prefiks qo'shish (agar xabar ustozdan bo'lsa)
-    if is_from_ustoz(admin_ids, message.from_user.id, text) and f"@{USTOZ_USERNAME}" in text:
-        prompt = "Ustoz fikrini tasdiqlab, bitta qisqa qo'shimcha bering. " + prompt
+    # Agar off-topic bo'lsa, ammo bevosita murojaat (mention/reply) yoki hazil bo'lsa — API'ga chiqmasdan qisqa hazil
+    if (not looks_it_topic(prompt) and (mentioned_directly(text) or reply_to_bot(message))) or is_playful_request(prompt):
+        jokes = [
+            "Katta ketmang, uka 🙂 Men IT mavzularida kuchliman. Savol bo'lsa marhamat",
+            "Ha, yordamchingizman — lekin darsdan qochirmayman 😉 Savolingizni aniqlashtiring",
+            "Hazil joyida, lekin kodni o'zingiz yozasiz 😄 Yo'nalish beraman!",
+        ]
+        await message.reply(random.choice(jokes))
+        return
+
+    # Kod so'rovi — APIsiz, darrov hazil
+    if is_code_request(prompt):
+        jokes = [
+            "Men kod yozsam, siz nima o'rganasiz? 🙂 Yo'nalish: muammoni aniqlang, kichik misol qiling, logni o'qing.",
+            "Kod? Yo‘q-yo‘q 🙂 Avval fikrni aniqla, o‘zing urin — men yo‘nalishni aytaman.",
+            "Kodni ustozlar yozadi, o‘quvchi esa o‘rganadi 😉 Qadam: talab → skelet → sinov.",
+        ]
+        await message.reply(random.choice(jokes))
+        return
+
+    # Ustoz xabari bo'lsa — doim tasdiq + bitta lo'nda qo'shimcha
+    if is_ustoz_message(message):
+        prompt = "Ustoz fikrini qisqa tasdiqlab, bitta lo'nda qo'shimcha bering: " + prompt
 
     try:
         answer = await chatgpt_answer(message.chat.id, prompt)
     except Exception:
         answer = "⚠️ API bilan bog'lanishda muammo yuz berdi. Birozdan so'ng urinib ko'ring."
 
-    # Qisqartirish (extra guard)
     if len(answer) > 350:
         answer = answer[:330] + "..."
 
     await message.reply(answer, disable_web_page_preview=True)
 
-# Foydalanuvchi state holatida bo'lsa ham xuddi shu mantiq
 @echo_router.message(F.text)
 async def group_only_listener_with_state(message: types.Message, state: FSMContext):
     await group_only_listener(message)
